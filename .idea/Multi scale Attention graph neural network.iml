@@ -5,5 +5,7 @@
     <orderEntry type="jdk" jdkName="Python 3.6.6 (~/anaconda3/bin/python)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="module" module-name="pyGAT-master" />
+    <orderEntry type="module" module-name="pytorch_DGCNN-master" />
+    <orderEntry type="module" module-name="cnn-graph-classification-master" />
   </component>
 </module>

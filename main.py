@@ -18,6 +18,7 @@ class Classifier(nn.Module):
         self.dgcnn = Model(latent_dim=args.latent_dim,
                          num_node_feats=args.feat_dim + args.attr_dim,
                          # label one hot vector dimension + att dimension
+                         node_feature_size=args.feat_dim,
                          k=args.sortpool_k)
 
         out_dim = self.dgcnn.dense_dim
@@ -69,6 +70,9 @@ class Classifier(nn.Module):
         else:
             # node_feat = torch.LongTensor(node_degs).view(-1, 1)
             node_feat = torch.ones(n_nodes, 1)  # use all-one vector as node features
+
+        node_feat = node_feat.cuda()
+        labels = labels.cuda()
 
         return node_feat, labels
 
@@ -133,6 +137,7 @@ if __name__ == '__main__':
         args.sortpool_k = max(10, args.sortpool_k)
         print('k used in SortPooling is: ' + str(args.sortpool_k))
     clf = Classifier()
+    clf = clf.cuda()
     optimizer = optim.Adam(clf.parameters(), lr=args.lr)
     train_idxes = list(range(len(train_graphs)))
     for epoch in range(args.num_epochs):

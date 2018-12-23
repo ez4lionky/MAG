@@ -3,6 +3,7 @@ import numpy as np
 import os
 import sys
 import torch
+import scipy.sparse as sp
 
 class _s2v_lib(object):
 
@@ -80,9 +81,12 @@ class _s2v_lib(object):
                                 ctypes.cast(val_list, ctypes.c_void_p))
         
         n2n_sp = torch.sparse.FloatTensor(n2n_idxes, n2n_vals, torch.Size([total_num_nodes, total_num_nodes]))
+        # 使用稀疏矩阵存储n2n_sp
+        n2n = sp.coo_matrix((n2n_vals, n2n_idxes), shape=(total_num_nodes, total_num_nodes))
+        non_zero = n2n.nonzero()
         e2n_sp = torch.sparse.FloatTensor(e2n_idxes, e2n_vals, torch.Size([total_num_nodes, total_num_edges * 2]))
         subg_sp = torch.sparse.FloatTensor(subg_idxes, subg_vals, torch.Size([len(graph_list), total_num_nodes]))
-        return n2n_sp, e2n_sp, subg_sp
+        return non_zero, n2n_sp, e2n_sp, subg_sp
 
     def PrepareLoopyBP(self, graph_list, is_directed=0):
         assert not is_directed
@@ -116,7 +120,6 @@ class _s2v_lib(object):
         self.lib.PrepareLoopyBP(self.batch_graph_handle,
                                 ctypes.cast(idx_list, ctypes.c_void_p),
                                 ctypes.cast(val_list, ctypes.c_void_p))
-
         n2e_sp = torch.sparse.FloatTensor(n2e_idxes, n2e_vals, torch.Size([total_num_edges * 2, total_num_nodes]))
         e2e_sp = torch.sparse.FloatTensor(e2e_idxes, e2e_vals, torch.Size([total_num_edges * 2, total_num_edges * 2]))
         e2n_sp = torch.sparse.FloatTensor(e2n_idxes, e2n_vals, torch.Size([total_num_nodes, total_num_edges * 2]))

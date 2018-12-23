@@ -3,7 +3,9 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/Multi scale Attention graph neural network.iml" filepath="$PROJECT_DIR$/.idea/Multi scale Attention graph neural network.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../baseline/pass/pass-cnn-graph-classification-master/.idea/cnn-graph-classification-master.iml" filepath="$PROJECT_DIR$/../baseline/pass/pass-cnn-graph-classification-master/.idea/cnn-graph-classification-master.iml" />
       <module fileurl="file://$PROJECT_DIR$/../pyGAT-master/.idea/pyGAT-master.iml" filepath="$PROJECT_DIR$/../pyGAT-master/.idea/pyGAT-master.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../baseline/pass/v-pytorch_DGCNN-master/.idea/pytorch_DGCNN-master.iml" filepath="$PROJECT_DIR$/../baseline/pass/v-pytorch_DGCNN-master/.idea/pytorch_DGCNN-master.iml" />
     </modules>
   </component>
 </project>
