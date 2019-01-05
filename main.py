@@ -1,16 +1,14 @@
-import sys
-import os
 import math
 import torch
 import random
 import numpy as np
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-from tqdm import tqdm
 from model import Model, MLPClassifier
 from util import args, load_data
 from sklearn import metrics
+from sklearn.model_selection import StratifiedKFold
+
 
 class Classifier(nn.Module):
     def __init__(self):
@@ -78,9 +76,22 @@ class Classifier(nn.Module):
 
 
     def forward(self, batch_graph):
-        node_feat, labels = self.PrepareData(batch_graph)
-        embed = self.dgcnn(batch_graph, node_feat)
+        length = len(batch_graph)
+        batch_graph = np.array(batch_graph)
+        index1 = list(range(0, int(length/2)))
+        index2 = list(range(int(length/2), length))
+        batch_graph1 = batch_graph[index1]
+        batch_graph2 = batch_graph[index2]
 
+        node_feat1, labels1 = self.PrepareData(batch_graph1)
+        node_feat2, labels2 = self.PrepareData(batch_graph2)
+
+
+        embed1 = self.dgcnn(batch_graph1, node_feat1)
+        embed2 = self.dgcnn(batch_graph2, node_feat2)
+
+        labels = torch.cat([labels1, labels2], 0)
+        embed = torch.cat([embed1, embed2], 0)
         return self.mlp(embed, labels)
 
 
@@ -92,10 +103,13 @@ def loop_dataset(g_list, clf, sample_idxes, optimizer=None, bsize=args.batch_siz
     all_pred = []
 
     n_samples = 0
+    inputs = None
     for pos in range(total_iters):
         selected_idx = sample_idxes[pos * bsize: (pos + 1) * bsize]
 
         batch_graph = [g_list[idx] for idx in selected_idx]
+        if pos == 1:
+            inputs = batch_graph
         targets = [g_list[idx].label for idx in selected_idx]
         all_targets += targets
         logits, loss, acc = clf(batch_graph)
@@ -111,7 +125,6 @@ def loop_dataset(g_list, clf, sample_idxes, optimizer=None, bsize=args.batch_siz
             print('loss: %0.5f acc: %0.5f' % (loss, acc))
 
         total_loss.append(np.array([loss, acc]) * len(selected_idx))
-
         n_samples += len(selected_idx)
 
     total_loss = np.array(total_loss)
@@ -121,21 +134,26 @@ def loop_dataset(g_list, clf, sample_idxes, optimizer=None, bsize=args.batch_siz
     # np.savetxt('test_scores.txt', all_pred)  # output test predictions
 
     all_targets = np.array(all_targets)
+
     fpr, tpr, _ = metrics.roc_curve(all_targets, all_pred, pos_label=1)
     auc = metrics.auc(fpr, tpr)
     avg_loss = np.concatenate((avg_loss, [auc]))
-
     return avg_loss
 
 
 if __name__ == '__main__':
     train_graphs, test_graphs = load_data()
+    # graphs = load_data()
+    print(args)
 
     if args.sortpool_k <= 1:
         num_nodes_list = sorted([g.num_nodes for g in train_graphs + test_graphs])
         args.sortpool_k = num_nodes_list[int(math.ceil(args.sortpool_k * len(num_nodes_list))) - 1]
         args.sortpool_k = max(10, args.sortpool_k)
         print('k used in SortPooling is: ' + str(args.sortpool_k))
+    # skf = StratifiedKFold(n_splits=10)
+    # for train_index, test_index in skf.split(graphs):
+    #     train_graphs, test_graphs = graphs[train_index], graphs[test_index]
     clf = Classifier()
     clf = clf.cuda()
     optimizer = optim.Adam(clf.parameters(), lr=args.lr)
@@ -143,8 +161,8 @@ if __name__ == '__main__':
     for epoch in range(args.num_epochs):
         random.shuffle(train_idxes)
         clf.train()
-        # 模型进入训练模式
 
+        # 模型进入训练模式，train和eval方法，主要是drop out与batch_norm层的操作不同
         avg_loss = loop_dataset(train_graphs, clf, train_idxes, optimizer=optimizer)
         print('\033[92maverage training of epoch %d: loss %.5f acc %.5f auc %.5f\033[0m' % (epoch, avg_loss[0], avg_loss[1], avg_loss[2]))
 

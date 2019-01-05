@@ -7,5 +7,6 @@
     <orderEntry type="module" module-name="pyGAT-master" />
     <orderEntry type="module" module-name="pytorch_DGCNN-master" />
     <orderEntry type="module" module-name="cnn-graph-classification-master" />
+    <orderEntry type="module" module-name="Data" />
   </component>
 </module>

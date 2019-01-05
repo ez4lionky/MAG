@@ -6,12 +6,12 @@ import networkx as nx
 cmd_par = argparse.ArgumentParser(description='Argparser for graph classification experiments')
 cmd_par.add_argument('-data', default='DD', help='data folder name')
 cmd_par.add_argument('-fold', type=int, default=1, help='Test data fold 1-10')
-cmd_par.add_argument('-latent_dim', type=str, default='32', help='dimension(s) of gcn layers')
+cmd_par.add_argument('-latent_dim', type=str, default='16 16 16 16', help='dimension(s) of attention layers')
 cmd_par.add_argument('-num_epochs', type=int, default=100, help='number of epochs')
 cmd_par.add_argument('-sortpool_k', type=float, default=0.6, help='Percentage of nodes kept after SortPooling')
-cmd_par.add_argument('-lr', type=float, default=0.0001, help='init learning_rate')
+cmd_par.add_argument('-lr', type=float, default=0.0005, help='init learning_rate')
 cmd_par.add_argument('-hidden', type=int, default=100, help='dimension of regression')
-cmd_par.add_argument('-batch_size', type=int, default=30, help='minibatch size')
+cmd_par.add_argument('-batch_size', type=int, default=50, help='minibatch size')
 
 args = cmd_par.parse_args()
 args.latent_dim = [int(x) for x in args.latent_dim.split(' ')]
@@ -50,7 +50,6 @@ class Graph(object):
 
 
 def load_data():
-
     print("\033[31m--loading data...\033[0m")
     g_list = []
     # graph list
@@ -133,6 +132,7 @@ def load_data():
     test_idxes = np.loadtxt('data/%s/10fold_idx/test_idx-%d.txt' % (args.data, args.fold),
                             dtype=np.int32).tolist()
     return [g_list[i] for i in train_idxes], [g_list[i] for i in test_idxes]
+    return g_list
 
 if __name__ == '__main__':
     train_graphs, test_graphs = load_data()

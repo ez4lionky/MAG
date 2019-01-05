@@ -1,6 +1,7 @@
 import os
 import sys
 import torch
+import numpy as np
 import torch.nn as nn
 from util import args
 import torch.nn.functional as F
@@ -11,21 +12,34 @@ sys.path.append('%s/s2v_lib' % os.path.dirname(os.path.realpath(__file__)))
 from s2v_lib import S2VLIB
 
 class Model(nn.Module):
-    def __init__(self, num_node_feats, node_feature_size, n_heads=4, latent_dim=32,
-                 k=30, conv1d_channels=[16, 32], conv1d_kws=[0, 5]):
+    def __init__(self, num_node_feats, node_feature_size, n_heads=4, latent_dim=[32, 32, 32, 32],
+                 k=30, conv1d_channels=[16, 32], conv1d_kws=[0, 5], lstm_hidden=20):
         print('\033[31m--Initializing Model...\033[0m\n')
         super(Model, self).__init__()
         self.num_node_feats = num_node_feats
         self.latent_dim = latent_dim
-        self.total_latent_dim = self.latent_dim * n_heads
+        self.total_latent_dim = sum(self.latent_dim)
+        # self.total_latent_dim = self.latent_dim
         self.k = k
         conv1d_kws[0] = self.total_latent_dim
 
-        self.attentions = [SpGraphAttentionLayer(in_features=node_feature_size, out_features=latent_dim, concat=True)
-                           for _ in range(n_heads)]
-        for _ in range(n_heads):
-            self.attentions[_].cuda()
+        # self.attentions = [SpGraphAttentionLayer(in_features=node_feature_size, out_features=latent_dim, concat=True)]
+        # for i in range(len(self.attentions)):
+        #     self.attentions[i].cuda()
 
+        self.attentions = []
+        for i in range(len(latent_dim)):
+            if i==0:
+                attention = [SpGraphAttentionLayer(in_features=node_feature_size, out_features=latent_dim[0], concat=True)
+                 for _ in range(n_heads)]
+            else:
+                attention = [SpGraphAttentionLayer(in_features=latent_dim[i-1], out_features=latent_dim[i], concat=True)
+                 for _ in range(n_heads)]
+            self.attentions.append(attention)
+
+        for i in range(len(latent_dim)):
+            for j in range(n_heads):
+                self.attentions[i][j].cuda()
 
         # 最后两层1D卷积和全连接层用于分类
         # sort pooling最后的输出是batch_size, 1, k * 97
@@ -38,8 +52,13 @@ class Model(nn.Module):
         # 最后一层卷积的kernel_size为5，stride为1，输出维度为 batch_size * channels[1] * ((k-2) / 2 + 1)
         # ？这里的1D卷积的维度问题？
 
+
+        self.lstm = torch.nn.LSTM(self.total_latent_dim, lstm_hidden, 2)
+
         dense_dim = int((k - 2) / 2 + 1)
         self.dense_dim = (dense_dim - conv1d_kws[1] + 1) * conv1d_channels[1]
+
+        # self.dense_dim = self.k * lstm_hidden
         # MLP层的输入维度，即logits=conv1d_res.view(len(graph_sizes), -1)的维度
 
         weights_init(self)
@@ -57,6 +76,7 @@ class Model(nn.Module):
 
         non_zero, n2n_sp, _, __ = S2VLIB.PrepareMeanField(graph_list)
         # n2n_sp matrix，[total_num_nodes, total_num_nodes]
+        # non_zero是有邻边的索引 2 * E
         # 一个batch中所有图的顶点数总和
 
         if isinstance(node_feat, torch.cuda.FloatTensor):
@@ -76,7 +96,16 @@ class Model(nn.Module):
 
         ''' graph convolution layers '''
         batch_size = len(graph_sizes)
-        cur_message_layer = torch.cat([att(non_zero, node_feat) for att in self.attentions], dim=1)
+        cat_message_layers = []
+        cur_message_layer = None
+        for i in range(len(self.latent_dim)):
+            if i==0:
+                cur_message_layer = np.sum([att(non_zero, node_feat) for att in self.attentions[i]])/len(self.attentions[i])
+            else:
+                cur_message_layer = np.sum([att(non_zero, cur_message_layer) for att in self.attentions[i]])/len(self.attentions[i])
+            cat_message_layers.append(cur_message_layer)
+
+        cur_message_layer = torch.cat(cat_message_layers, 1)
         ''' sortpooling layer '''
         sort_channel = cur_message_layer[:, -1]
         # sort_channel：　total_node * 1
@@ -87,6 +116,7 @@ class Model(nn.Module):
         if isinstance(node_feat.data, torch.cuda.FloatTensor):
             batch_sortpooling_graphs = batch_sortpooling_graphs.cuda()
         accum_count = 0
+        # sort pool操作只对node_feat进行操作
         for i in range(batch_size):
             to_sort = sort_channel[accum_count: accum_count + graph_sizes[i]]
             k = self.k if self.k <= graph_sizes[i] else graph_sizes[i]  #　下面只需要判断是否pad
@@ -108,21 +138,32 @@ class Model(nn.Module):
             # 每次对一个batch的feature进行sort
 
         ''' traditional 1d convlution and dense layers '''
+        # batch_size * self.k * total_latent_dim
+        # 图的数量 * 每个图固定的顶点数 * 最终维度
+        res = []
         to_conv1d = batch_sortpooling_graphs.view((-1, 1, self.k * self.total_latent_dim))
-        # pytorch的卷积输入是： 图片 => channels * width * height;句子 => sentence_length * embedding_size
-        # 1D卷积只在一个方向上做卷积，2D卷积要在两个方向上做卷积，唯一的不同是stride参数可能会有些不一样
-        # 一次对一个图的特征进行1D-CNN
-        # （1D卷积kernel_size=3 <==> 2D kernel_size=3, embedding_size）
-        # 即1D卷积默认只是朝一个方向，默认另外一个方向上的维度为全部
-        # view => reshape, shape = batch_size, 1, 顶点数 * 97
         conv1d_res = self.conv1d_params1(to_conv1d)
         conv1d_res = F.relu(conv1d_res)
+        # print("conv1d_res.shape", conv1d_res.shape) # 50 * 16 * 291
         conv1d_res = self.maxpool1d(conv1d_res)
+        res.append(conv1d_res.view(len(graph_sizes), -1))
+        # print("conv1d_res.shape", conv1d_res.shape) # 50 * 16 * 145
         conv1d_res = self.conv1d_params2(conv1d_res)
         conv1d_res = F.relu(conv1d_res)
-        logits = conv1d_res.view(len(graph_sizes), -1)
+        res.append(conv1d_res.view(len(graph_sizes), -1))
+        # print("conv1d_res.shape", conv1d_res.shape) # 50 * 32 * 141
 
-        return F.relu(logits)
+        # to_dense = torch.cat(res, 1)
+        to_dense = conv1d_res.view(len(graph_sizes), -1)
+
+        return F.relu(to_dense)
+
+        # to_lstm = batch_sortpooling_graphs.view((self.k, -1, self.total_latent_dim))
+        # lstm_features, self_hidden = self.lstm(to_lstm)
+        # logits = lstm_features.view(len(graph_sizes), -1)
+        #
+        # return F.relu(logits)
+
 
 class MLPClassifier(nn.Module):
     def __init__(self, input_size, hidden_size, num_class):
@@ -212,8 +253,10 @@ class SpGraphAttentionLayer(nn.Module):
 
         # Self-attention on the nodes - Shared attention mechanism
         edge_h = torch.cat((h[edge[0, :], :], h[edge[1, :], :]), dim=1).t()
-        # edge: 2*D x E
+        # edge: 2 x E
 
+        print(edge.shape)
+        print(edge_h.shape)
         edge_e = torch.exp(-self.leakyrelu(self.a.mm(edge_h).squeeze()))
         assert not torch.isnan(edge_e).any()
         # edge_e: E

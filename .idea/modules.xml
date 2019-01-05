@@ -2,6 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
+      <module fileurl="file:///media/lionky/DA18EBFA09C1B27D/机器学习/Credit scoring/基于词向量与Self-Attention的信用评估模型/German Data/.idea/Data.iml" filepath="/media/lionky/DA18EBFA09C1B27D/机器学习/Credit scoring/基于词向量与Self-Attention的信用评估模型/German Data/.idea/Data.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/Multi scale Attention graph neural network.iml" filepath="$PROJECT_DIR$/.idea/Multi scale Attention graph neural network.iml" />
       <module fileurl="file://$PROJECT_DIR$/../baseline/pass/pass-cnn-graph-classification-master/.idea/cnn-graph-classification-master.iml" filepath="$PROJECT_DIR$/../baseline/pass/pass-cnn-graph-classification-master/.idea/cnn-graph-classification-master.iml" />
       <module fileurl="file://$PROJECT_DIR$/../pyGAT-master/.idea/pyGAT-master.iml" filepath="$PROJECT_DIR$/../pyGAT-master/.idea/pyGAT-master.iml" />
