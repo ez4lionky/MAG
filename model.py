@@ -16,11 +16,12 @@ class Model(nn.Module):
                  k=30, conv1d_channels=[16, 32], conv1d_kws=[0, 5], lstm_hidden=20):
         print('\033[31m--Initializing Model...\033[0m\n')
         super(Model, self).__init__()
+        self.k = k
         self.num_node_feats = num_node_feats
         self.latent_dim = latent_dim
-        self.total_latent_dim = sum(self.latent_dim)
-        # self.total_latent_dim = self.latent_dim
-        self.k = k
+        # self.total_latent_dim = sum(latent_dim) * n_heads
+        self.total_latent_dim = sum(latent_dim[:-1]) * n_heads + latent_dim[-1]
+        self.WO = nn.Parameter(torch.zeros(size=(self.total_latent_dim, sum(latent_dim))))
         conv1d_kws[0] = self.total_latent_dim
 
         # self.attentions = [SpGraphAttentionLayer(in_features=node_feature_size, out_features=latent_dim, concat=True)]
@@ -29,12 +30,14 @@ class Model(nn.Module):
 
         self.attentions = []
         for i in range(len(latent_dim)):
-            if i==0:
-                attention = [SpGraphAttentionLayer(in_features=node_feature_size, out_features=latent_dim[0], concat=True)
-                 for _ in range(n_heads)]
+            if i == 0:
+                attention = [
+                    SpGraphAttentionLayer(in_features=node_feature_size, out_features=latent_dim[0], concat=True)
+                    for _ in range(n_heads)]
             else:
-                attention = [SpGraphAttentionLayer(in_features=latent_dim[i-1], out_features=latent_dim[i], concat=True)
-                 for _ in range(n_heads)]
+                attention = [
+                    SpGraphAttentionLayer(in_features=latent_dim[i - 1] * n_heads, out_features=latent_dim[i],
+                                          concat=True) for _ in range(n_heads)]
             self.attentions.append(attention)
 
         for i in range(len(latent_dim)):
@@ -100,12 +103,16 @@ class Model(nn.Module):
         cur_message_layer = None
         for i in range(len(self.latent_dim)):
             if i==0:
-                cur_message_layer = np.sum([att(non_zero, node_feat) for att in self.attentions[i]])/len(self.attentions[i])
+                cur_message_layer = torch.cat([att(non_zero, node_feat) for att in self.attentions[i]], dim=1)
+            # elif i!=len(self.latent_dim)-1:
             else:
-                cur_message_layer = np.sum([att(non_zero, cur_message_layer) for att in self.attentions[i]])/len(self.attentions[i])
+                cur_message_layer = torch.cat([att(non_zero, cur_message_layer) for att in self.attentions[i]], dim=1)
+            # else:
+            #     cur_message_layer = np.sum([att(non_zero, cur_message_layer) for att in self.attentions[i]])/len(self.attentions[i])
             cat_message_layers.append(cur_message_layer)
 
         cur_message_layer = torch.cat(cat_message_layers, 1)
+        # cur_message_layer = torch.mm()
         ''' sortpooling layer '''
         sort_channel = cur_message_layer[:, -1]
         # sort_channel：　total_node * 1
@@ -234,46 +241,92 @@ class SpGraphAttentionLayer(nn.Module):
         self.out_features = out_features
         self.concat = concat
 
-        self.W = nn.Parameter(torch.zeros(size=(in_features, out_features)))
-        nn.init.xavier_normal_(self.W.data, gain=1.414)
+        # self.W = nn.Parameter(torch.zeros(size=(in_features, out_features)))
+        # nn.init.xavier_normal_(self.W.data, gain=1.414)
+        #
+        # self.a = nn.Parameter(torch.zeros(size=(1, 2 * out_features)))
+        # nn.init.xavier_normal_(self.a.data, gain=1.414)
 
-        self.a = nn.Parameter(torch.zeros(size=(1, 2 * out_features)))
-        nn.init.xavier_normal_(self.a.data, gain=1.414)
+        self.WQ = nn.Parameter(torch.zeros(size=(in_features, out_features)))
+        self.WK = nn.Parameter(torch.zeros(size=(in_features, out_features)))
+        self.WV = nn.Parameter(torch.zeros(size=(in_features, out_features)))
+
+        nn.init.xavier_normal_(self.WQ.data, gain=1.414)
+        nn.init.xavier_normal_(self.WK.data, gain=1.414)
+        nn.init.xavier_normal_(self.WV.data, gain=1.414)
 
         self.dropout = nn.Dropout(0.6)
         self.leakyrelu = nn.LeakyReLU(0.2)
         self.special_spmm = SpecialSpmm()
+        self.softmax = nn.Softmax(dim=1)
 
     def forward(self, non_zero, input):
+        # Additive attention layer
+        # N = input.size()[0]
+        # edge = torch.LongTensor(non_zero)
+        # h = torch.mm(input, self.W)
+        # # h: N x out
+        # assert not torch.isnan(h).any()
+        #
+        # # Self-attention on the nodes - Shared attention mechanism
+        # edge_h = torch.cat((h[edge[0, :], :], h[edge[1, :], :]), dim=1).t()
+        # # edge: 2 x E
+        #
+        # edge_e = torch.exp(-self.leakyrelu(self.a.mm(edge_h).squeeze()))
+        # assert not torch.isnan(edge_e).any()
+        # # edge_e: E
+        #
+        # e_rowsum = self.special_spmm(edge, edge_e, torch.Size([N, N]), torch.ones(size=(N, 1)))
+        # # e_rowsum: N x 1
+        #
+        # edge_e = self.dropout(edge_e)
+        # # edge_e: E
+        #
+        # h_prime = self.special_spmm(edge, edge_e, torch.Size([N, N]), h)
+        # assert not torch.isnan(h_prime).any()
+        # # h_prime: N x out
+        #
+        # h_prime = h_prime.div(e_rowsum)
+        # # h_prime: N x out
+        # assert not torch.isnan(h_prime).any()
+        #
+        # if self.concat:
+        #     # if this layer is not last layer,
+        #     return F.elu(h_prime)
+        # else:
+        #     # if this layer is last layer,
+        #     return h_prime
+
+        # Self attention
+        # print("input.shape:", input.shape) # input是一个batch所有顶点的特征，如： 14312 * 82
         N = input.size()[0]
-        edge = torch.LongTensor(non_zero)
-        h = torch.mm(input, self.W)
+        edge = torch.LongTensor(non_zero)  # 2 * E
+        E = edge.size()[1]
+        # edge: 2 x E
+        Qh = torch.matmul(input, self.WQ)
+        Kh = torch.matmul(input, self.WK)
+        Vh = torch.matmul(input, self.WV)
+
+        # W是右乘，因此和顶点数量没有关系
         # h: N x out
-        assert not torch.isnan(h).any()
+        assert not torch.isnan(Qh).any()
+        assert not torch.isnan(Kh).any()
+        assert not torch.isnan(Vh).any()
 
         # Self-attention on the nodes - Shared attention mechanism
-        edge_h = torch.cat((h[edge[0, :], :], h[edge[1, :], :]), dim=1).t()
-        # edge: 2 x E
+        scale = input.size(-1) ** 0.5
+        edge_e = F.softmax(torch.mm(Qh, Kh.t()) / scale, dim=1)  # N * N
+        # edge_e = F.softmax(torch.mul(Qh, Kh) / scale, dim=1)  # N * F
+        mask_att = self.special_spmm(edge, torch.ones(size=(E,)), torch.Size([N, N]), edge_e)
 
-        print(edge.shape)
-        print(edge_h.shape)
-        edge_e = torch.exp(-self.leakyrelu(self.a.mm(edge_h).squeeze()))
         assert not torch.isnan(edge_e).any()
+        edge_e = torch.mm(mask_att, Vh)
+        # edge_e = torch.mul(mask_att, Vh)
+        h_prime = self.dropout(edge_e)
         # edge_e: E
 
-        e_rowsum = self.special_spmm(edge, edge_e, torch.Size([N, N]), torch.ones(size=(N, 1)))
-        # e_rowsum: N x 1
-
-        edge_e = self.dropout(edge_e)
-        # edge_e: E
-
-        h_prime = self.special_spmm(edge, edge_e, torch.Size([N, N]), h)
         assert not torch.isnan(h_prime).any()
         # h_prime: N x out
-
-        h_prime = h_prime.div(e_rowsum)
-        # h_prime: N x out
-        assert not torch.isnan(h_prime).any()
 
         if self.concat:
             # if this layer is not last layer,
