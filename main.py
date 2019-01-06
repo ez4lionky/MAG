@@ -145,7 +145,7 @@ if __name__ == '__main__':
     train_graphs, test_graphs = load_data()
     # graphs = load_data()
     print(args)
-
+    random.seed(1)
     if args.sortpool_k <= 1:
         num_nodes_list = sorted([g.num_nodes for g in train_graphs + test_graphs])
         args.sortpool_k = num_nodes_list[int(math.ceil(args.sortpool_k * len(num_nodes_list))) - 1]

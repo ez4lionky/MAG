@@ -6,12 +6,12 @@ import networkx as nx
 cmd_par = argparse.ArgumentParser(description='Argparser for graph classification experiments')
 cmd_par.add_argument('-data', default='DD', help='data folder name')
 cmd_par.add_argument('-fold', type=int, default=1, help='Test data fold 1-10')
-cmd_par.add_argument('-latent_dim', type=str, default='16 16 16 16', help='dimension(s) of attention layers')
+cmd_par.add_argument('-latent_dim', type=str, default='32 32 32', help='dimension(s) of attention layers')
 cmd_par.add_argument('-num_epochs', type=int, default=100, help='number of epochs')
 cmd_par.add_argument('-sortpool_k', type=float, default=0.6, help='Percentage of nodes kept after SortPooling')
-cmd_par.add_argument('-lr', type=float, default=0.0005, help='init learning_rate')
+cmd_par.add_argument('-lr', type=float, default=0.00002, help='init learning_rate')
 cmd_par.add_argument('-hidden', type=int, default=100, help='dimension of regression')
-cmd_par.add_argument('-batch_size', type=int, default=50, help='minibatch size')
+cmd_par.add_argument('-batch_size', type=int, default=10, help='minibatch size')
 
 args = cmd_par.parse_args()
 args.latent_dim = [int(x) for x in args.latent_dim.split(' ')]
