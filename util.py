@@ -12,6 +12,9 @@ cmd_par.add_argument('-sortpool_k', type=float, default=0.6, help='Percentage of
 cmd_par.add_argument('-lr', type=float, default=0.00002, help='init learning_rate')
 cmd_par.add_argument('-hidden', type=int, default=100, help='dimension of regression')
 cmd_par.add_argument('-batch_size', type=int, default=10, help='minibatch size')
+cmd_par.add_argument('-model', type=int, default=0, help='0, 1, 2')
+# 0 presents Attention in concat features, 1 presents Attention separate, 2 presents add fusion function
+cmd_par.add_argument('-concat', type=int, default=1, help='0 presents concat, 1 presents not concat')
 
 args = cmd_par.parse_args()
 args.latent_dim = [int(x) for x in args.latent_dim.split(' ')]
