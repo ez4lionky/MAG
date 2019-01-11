@@ -18,13 +18,17 @@ class Model(nn.Module):
         super(Model, self).__init__()
         self.num_node_feats = num_node_feats
         self.latent_dim = latent_dim
-        if args.model==0:
+        if args.model=='concat':
             # Attention in concat feature
             self.k = k
             self.att_in_size = sum(latent_dim)
-        elif args.model==1:
+        elif args.model=='separate':
             # Separate attention each layer
             self.k = k * len(latent_dim)
+            self.att_in_size = latent_dim[0]
+        elif args.model == 'fusion':
+            # Fusion attention multi scale
+            self.k = k
             self.att_in_size = latent_dim[0]
 
         ''' GCN weights '''
@@ -42,7 +46,11 @@ class Model(nn.Module):
         for i in range(n_heads):
             self.attention[i] = self.attention[i].cuda()
 
-        self.att_out_size = att_out_size * n_heads
+        if args.model!='fusion':
+            self.att_out_size = att_out_size * n_heads
+        else:
+            # fusion 不需要对attention进行concat
+            self.att_out_size = att_out_size
         conv1d_kws[0] = self.att_out_size
         ''' 2layers 1DCNN for classification '''
         # 最后两层1D卷积和全连接层用于分类
@@ -101,6 +109,7 @@ class Model(nn.Module):
     def sortpooling_embedding(self, non_zero, node_feat, n2n_sp, graph_sizes, node_degs):
         ''' graph convolution layers '''
         lv = 0
+        N = n2n_sp.size(0)
         batch_size = len(graph_sizes)
         cur_message_layer = node_feat
         cat_message_layers = []
@@ -113,11 +122,45 @@ class Model(nn.Module):
             cat_message_layers.append(cur_message_layer)
             lv += 1
 
+        # Attention in concat feature
+        if args.model=='concat':
+            cur_message_layer = torch.cat(cat_message_layers, 1)
+            cur_message_layer = torch.cat([att(non_zero, cur_message_layer)[0] for att in self.attention], dim=1)
+            # (total_node, sum(latent_dim))
+
         # Separate attention each layer
-        # cur_message_layer = torch.cat(cat_message_layers, 0)
-        cur_message_layer = torch.cat(cat_message_layers, 1)
-        cur_message_layer = torch.cat([att(non_zero, cur_message_layer) for att in self.attention], dim=1)
-        # (total_node * k, latent_dim)
+        elif args.model=='separate':
+            cur_message_layer = torch.cat(cat_message_layers, 0)
+            cur_message_layer = torch.cat([att(non_zero, cur_message_layer)[0] for att in self.attention], dim=1)
+            # (total_node * k, latent_dim)
+
+        # Fusion attention multi scale
+        elif args.model=='fusion':
+            a = []
+            for f in cat_message_layers:
+                tmp = torch.cat([att(non_zero, f)[1].view(-1, 1) for att in self.attention], dim=1)
+                a.append((torch.sum(tmp, 1) / len(self.attention)).view(-1, 1))
+            # Attention fusion
+            if args.ff=='max':
+                a = torch.cat(a, dim=1)
+                a_r = torch.max(a, 1)
+            elif args.ff=='sum':
+                a = torch.cat(a, dim=1)
+                a_r = torch.sum(a, 1)
+            elif args.ff=='mul':
+                a_r = None
+                for i in range(len(cat_message_layers)):
+                    if i==0:
+                        a_r = a[0]
+                    else:
+                        a_r = torch.mul(a_r, a[i])
+
+            # M = AX
+            a_r = a_r.view(-1)
+            special_spmm = SpecialSpmm()
+            non_zero = torch.LongTensor(non_zero)
+            cur_message_layer = special_spmm(non_zero, a_r, torch.Size([N, N]), cat_message_layers[-1])
+            # (total_node, latent_dim)
 
         ''' sortpooling layer '''
         sort_channel = cur_message_layer[:, -1]
@@ -238,7 +281,6 @@ class SpecialSpmm(nn.Module):
     def forward(self, indices, values, shape, b):
         return SpecialSpmmFunction.apply(indices, values, shape, b)
 
-
 class SpGraphAttentionLayer(nn.Module):
     """
     Sparse version GAT layer, similar to https://arxiv.org/abs/1710.10903
@@ -266,7 +308,7 @@ class SpGraphAttentionLayer(nn.Module):
         # Additive attention layer
         N = input.size()[0]
 
-        if args.model==1:
+        if args.model=='separate':
             # Separate attention each GCN layer
             n = int(N / self.layer)
             non_zero = list(non_zero)
@@ -285,32 +327,29 @@ class SpGraphAttentionLayer(nn.Module):
 
         # Self-attention on the nodes - Shared attention mechanism
         edge_h = torch.cat((h[edge[0, :], :], h[edge[1, :], :]), dim=1).t()
+        # mask
         # edge: 2 x E
+        # edge_h: E × 2F'
 
         edge_e = torch.exp(-self.leakyrelu(self.a.mm(edge_h).squeeze()))
         assert not torch.isnan(edge_e).any()
-        # edge_e: E
-
-        e_rowsum = self.special_spmm(edge, edge_e, torch.Size([N, N]), torch.ones(size=(N, 1)))
-        # e_rowsum: N x 1
+        # edge_e: E × 1
 
         edge_e = self.dropout(edge_e)
-        # edge_e: E
 
         h_prime = self.special_spmm(edge, edge_e, torch.Size([N, N]), h)
+        # 自动mask,因为其他是0
         assert not torch.isnan(h_prime).any()
         # h_prime: N x out
 
-        h_prime = h_prime.div(e_rowsum)
-        # h_prime: N x out
         assert not torch.isnan(h_prime).any()
 
         if self.concat:
             # if this layer is not last layer,
-            return F.elu(h_prime)
+            return F.elu(h_prime), edge_e
         else:
             # if this layer is last layer,
-            return h_prime
+            return h_prime, edge_e
 
 
     def __repr__(self):

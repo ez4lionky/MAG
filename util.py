@@ -7,14 +7,15 @@ cmd_par = argparse.ArgumentParser(description='Argparser for graph classificatio
 cmd_par.add_argument('-data', default='DD', help='data folder name')
 cmd_par.add_argument('-fold', type=int, default=1, help='Test data fold 1-10')
 cmd_par.add_argument('-latent_dim', type=str, default='32 32 32', help='dimension(s) of attention layers')
-cmd_par.add_argument('-num_epochs', type=int, default=100, help='number of epochs')
+cmd_par.add_argument('-num_epochs', type=int, default=300, help='number of epochs')
 cmd_par.add_argument('-sortpool_k', type=float, default=0.6, help='Percentage of nodes kept after SortPooling')
-cmd_par.add_argument('-lr', type=float, default=0.00002, help='init learning_rate')
+cmd_par.add_argument('-lr', type=float, default=0.00001, help='init learning_rate')
 cmd_par.add_argument('-hidden', type=int, default=100, help='dimension of regression')
-cmd_par.add_argument('-batch_size', type=int, default=10, help='minibatch size')
-cmd_par.add_argument('-model', type=int, default=0, help='0, 1, 2')
+cmd_par.add_argument('-batch_size', type=int, default=30, help='minibatch size')
+cmd_par.add_argument('-model', type=str, default='fusion', help='concat, separate, fusion')
 # 0 presents Attention in concat features, 1 presents Attention separate, 2 presents add fusion function
 cmd_par.add_argument('-concat', type=int, default=1, help='0 presents concat, 1 presents not concat')
+cmd_par.add_argument('-ff', type=str, default='sum', help='fusion function - max, sum, mul')
 
 args = cmd_par.parse_args()
 args.latent_dim = [int(x) for x in args.latent_dim.split(' ')]
