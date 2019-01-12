@@ -159,7 +159,9 @@ class Model(nn.Module):
             a_r = a_r.view(-1)
             special_spmm = SpecialSpmm()
             non_zero = torch.LongTensor(non_zero)
+            # row_sum = special_spmm(non_zero, a_r, torch.Size([N, N]), torch.ones(size=(N, 1)).cuda())
             cur_message_layer = special_spmm(non_zero, a_r, torch.Size([N, N]), cat_message_layers[-1])
+            # cur_message_layer /= row_sum
             # (total_node, latent_dim)
 
         ''' sortpooling layer '''
@@ -331,13 +333,16 @@ class SpGraphAttentionLayer(nn.Module):
         # edge: 2 x E
         # edge_h: E × 2F'
 
-        edge_e = torch.exp(-self.leakyrelu(self.a.mm(edge_h).squeeze()))
+        att = self.leakyrelu(self.a.mm(edge_h).squeeze())
+        edge_e = torch.exp(-att)
+        e_rowsum = self.special_spmm(edge, edge_e, torch.Size([N, N]), torch.ones(size=(N, 1)).cuda())
         assert not torch.isnan(edge_e).any()
         # edge_e: E × 1
 
         edge_e = self.dropout(edge_e)
 
         h_prime = self.special_spmm(edge, edge_e, torch.Size([N, N]), h)
+        h_prime /= e_rowsum
         # 自动mask,因为其他是0
         assert not torch.isnan(h_prime).any()
         # h_prime: N x out
@@ -346,12 +351,81 @@ class SpGraphAttentionLayer(nn.Module):
 
         if self.concat:
             # if this layer is not last layer,
-            return F.elu(h_prime), edge_e
+            return F.elu(h_prime), att
         else:
             # if this layer is last layer,
-            return h_prime, edge_e
+            return h_prime, att
 
+    class FusionAttentionLayer(nn.Module):
+        """
+        Sparse version GAT layer, similar to https://arxiv.org/abs/1710.10903
+        """
 
+        def __init__(self, in_features, out_features, layer, concat=True):
+            super(SpGraphAttentionLayer, self).__init__()
+            self.in_features = in_features
+            self.out_features = out_features
+            self.concat = concat
+            self.layer = layer
+
+            self.W = nn.Parameter(torch.zeros(size=(in_features, out_features)))
+            nn.init.xavier_normal_(self.W.data, gain=1.414)
+
+            self.a = nn.Parameter(torch.zeros(size=(1, 2 * out_features)))
+            nn.init.xavier_normal_(self.a.data, gain=1.414)
+
+            self.dropout = nn.Dropout(0.6)
+            self.leakyrelu = nn.LeakyReLU(0.2)
+            self.special_spmm = SpecialSpmm()
+            self.softmax = nn.Softmax(dim=1)
+
+        def forward(self, non_zero, input):
+            # Additive attention layer
+            N = input.size()[0]
+
+            if args.model == 'separate':
+                # Separate attention each GCN layer
+                n = int(N / self.layer)
+                non_zero = list(non_zero)
+                tmp1 = []
+                tmp2 = []
+                for i in range(self.layer):
+                    tmp1.append(np.add(non_zero[0], n * i))
+                    tmp2.append(np.add(non_zero[1], n * i))
+                non_zero[0] = np.concatenate(tmp1)
+                non_zero[1] = np.concatenate(tmp2)
+
+            edge = torch.LongTensor(non_zero)
+            h = torch.mm(input, self.W)
+            # h: N x out
+            assert not torch.isnan(h).any()
+
+            # Self-attention on the nodes - Shared attention mechanism
+            edge_h = torch.cat((h[edge[0, :], :], h[edge[1, :], :]), dim=1).t()
+            # mask
+            # edge: 2 x E
+            # edge_h: E × 2F'
+
+            att = self.leakyrelu(self.a.mm(edge_h).squeeze())
+            edge_e = torch.exp(-att)
+            assert not torch.isnan(edge_e).any()
+            # edge_e: E × 1
+
+            edge_e = self.dropout(edge_e)
+
+            h_prime = self.special_spmm(edge, edge_e, torch.Size([N, N]), h)
+            # 自动mask,因为其他是0
+            assert not torch.isnan(h_prime).any()
+            # h_prime: N x out
+
+            assert not torch.isnan(h_prime).any()
+
+            if self.concat:
+                # if this layer is not last layer,
+                return F.elu(h_prime), att
+            else:
+                # if this layer is last layer,
+                return h_prime, att
     def __repr__(self):
         return self.__class__.__name__ + ' (' + str(self.in_features) + ' -> ' + str(self.out_features) + ')'
 
