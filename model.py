@@ -12,13 +12,13 @@ sys.path.append('%s/s2v_lib' % os.path.dirname(os.path.realpath(__file__)))
 from s2v_lib import S2VLIB
 
 class Model(nn.Module):
-    def __init__(self, num_node_feats, node_feature_size, n_heads=4, att_out_size=32, latent_dim=[32, 32, 32],
-                 k=30, conv1d_channels=[16, 32], conv1d_kws=[0, 5], lstm_hidden=20):
+    def __init__(self, num_node_feats, n_heads=4, latent_dim=[32, 32, 32], k=30, conv1d_channels=[16, 32],
+                 conv1d_kws=[0, 5], lstm_hidden=20, embedding_size=3):
         print('\033[31m--Initializing Model...\033[0m\n')
         super(Model, self).__init__()
         self.num_node_feats = num_node_feats
         self.latent_dim = latent_dim
-        if args.model=='concat':
+        if args.model=='concat' or args.model=='no-att':
             # Attention in concat feature
             self.k = k
             self.att_in_size = sum(latent_dim)
@@ -31,26 +31,33 @@ class Model(nn.Module):
             self.k = k
             self.att_in_size = latent_dim[0]
 
+        self.embedding = nn.Embedding(num_node_feats, embedding_size)
         ''' GCN weights '''
         self.conv_params = nn.ModuleList()
-        self.conv_params.append(nn.Linear(num_node_feats, latent_dim[0]))
+        if args.embedding==True:
+            self.conv_params.append(nn.Linear(embedding_size, latent_dim[0]))
+        else:
+            self.conv_params.append(nn.Linear(num_node_feats, latent_dim[0]))
         # X * W => N * F'
         # latent_dim是图卷积层的channel数
         # 添加GCN的weights参数
         for i in range(1, len(latent_dim)):
             self.conv_params.append(nn.Linear(latent_dim[i-1], latent_dim[i]))
 
+        att_out_size = latent_dim[-1]
         ''' Sort pool attention '''
         self.attention = [SpGraphAttentionLayer(in_features=self.att_in_size, out_features=att_out_size,
                                                 layer=len(latent_dim),concat=True) for _ in range(n_heads)]
         for i in range(n_heads):
             self.attention[i] = self.attention[i].cuda()
 
-        if args.model!='fusion':
-            self.att_out_size = att_out_size * n_heads
+        if args.model=='fusion':
+            self.att_out_size = att_out_size
+        elif args.model=='no-att':
+            self.att_out_size = sum(latent_dim)
         else:
             # fusion 不需要对attention进行concat
-            self.att_out_size = att_out_size
+            self.att_out_size = att_out_size * n_heads
         conv1d_kws[0] = self.att_out_size
         ''' 2layers 1DCNN for classification '''
         # 最后两层1D卷积和全连接层用于分类
@@ -111,13 +118,18 @@ class Model(nn.Module):
         lv = 0
         N = n2n_sp.size(0)
         batch_size = len(graph_sizes)
+        n2n_sp = n2n_sp.cuda()
+        node_degs = node_degs.cuda()
+        if args.embedding==True:
+            node_feat = self.embedding(node_feat.type(torch.LongTensor).cuda()).squeeze()
         cur_message_layer = node_feat
         cat_message_layers = []
         while lv < len(self.latent_dim):
             # n2n_sp即为邻接矩阵，一个batch所有图的邻接矩阵
             n2npool = gnn_spmm(n2n_sp, cur_message_layer) + cur_message_layer  # Y = (A + I) * X
             node_linear = self.conv_params[lv](n2npool)  # Y = Y * W => shape N * F'
-            normalized_linear = node_linear.div(node_degs)  # Y = D^-1 * Y
+            normalized_linear = node_linear
+            # normalized_linear = node_linear.div(node_degs)  # Y = D^-1 * Y
             cur_message_layer = torch.tanh(normalized_linear)
             cat_message_layers.append(cur_message_layer)
             lv += 1
@@ -159,11 +171,11 @@ class Model(nn.Module):
             a_r = a_r.view(-1)
             special_spmm = SpecialSpmm()
             non_zero = torch.LongTensor(non_zero)
-            # row_sum = special_spmm(non_zero, a_r, torch.Size([N, N]), torch.ones(size=(N, 1)).cuda())
             cur_message_layer = special_spmm(non_zero, a_r, torch.Size([N, N]), cat_message_layers[-1])
-            # cur_message_layer /= row_sum
             # (total_node, latent_dim)
-
+        # No attention and just concat standard GNN
+        elif args.model=='no-att':
+            cur_message_layer = torch.cat(cat_message_layers, 1)
         ''' sortpooling layer '''
         sort_channel = cur_message_layer[:, -1]
         # sort_channel：　total_node * 1
@@ -301,7 +313,7 @@ class SpGraphAttentionLayer(nn.Module):
         self.a = nn.Parameter(torch.zeros(size=(1, 2 * out_features)))
         nn.init.xavier_normal_(self.a.data, gain=1.414)
 
-        self.dropout = nn.Dropout(0.6)
+        self.dropout = nn.Dropout(0.3)
         self.leakyrelu = nn.LeakyReLU(0.2)
         self.special_spmm = SpecialSpmm()
         self.softmax = nn.Softmax(dim=1)
@@ -333,16 +345,13 @@ class SpGraphAttentionLayer(nn.Module):
         # edge: 2 x E
         # edge_h: E × 2F'
 
-        att = self.leakyrelu(self.a.mm(edge_h).squeeze())
-        edge_e = torch.exp(-att)
-        e_rowsum = self.special_spmm(edge, edge_e, torch.Size([N, N]), torch.ones(size=(N, 1)).cuda())
+        edge_e = torch.exp(-self.leakyrelu(self.a.mm(edge_h).squeeze()))
         assert not torch.isnan(edge_e).any()
         # edge_e: E × 1
 
         edge_e = self.dropout(edge_e)
 
         h_prime = self.special_spmm(edge, edge_e, torch.Size([N, N]), h)
-        h_prime /= e_rowsum
         # 自动mask,因为其他是0
         assert not torch.isnan(h_prime).any()
         # h_prime: N x out
@@ -351,81 +360,12 @@ class SpGraphAttentionLayer(nn.Module):
 
         if self.concat:
             # if this layer is not last layer,
-            return F.elu(h_prime), att
+            return F.elu(h_prime), edge_e
         else:
             # if this layer is last layer,
-            return h_prime, att
+            return h_prime, edge_e
 
-    class FusionAttentionLayer(nn.Module):
-        """
-        Sparse version GAT layer, similar to https://arxiv.org/abs/1710.10903
-        """
 
-        def __init__(self, in_features, out_features, layer, concat=True):
-            super(SpGraphAttentionLayer, self).__init__()
-            self.in_features = in_features
-            self.out_features = out_features
-            self.concat = concat
-            self.layer = layer
-
-            self.W = nn.Parameter(torch.zeros(size=(in_features, out_features)))
-            nn.init.xavier_normal_(self.W.data, gain=1.414)
-
-            self.a = nn.Parameter(torch.zeros(size=(1, 2 * out_features)))
-            nn.init.xavier_normal_(self.a.data, gain=1.414)
-
-            self.dropout = nn.Dropout(0.6)
-            self.leakyrelu = nn.LeakyReLU(0.2)
-            self.special_spmm = SpecialSpmm()
-            self.softmax = nn.Softmax(dim=1)
-
-        def forward(self, non_zero, input):
-            # Additive attention layer
-            N = input.size()[0]
-
-            if args.model == 'separate':
-                # Separate attention each GCN layer
-                n = int(N / self.layer)
-                non_zero = list(non_zero)
-                tmp1 = []
-                tmp2 = []
-                for i in range(self.layer):
-                    tmp1.append(np.add(non_zero[0], n * i))
-                    tmp2.append(np.add(non_zero[1], n * i))
-                non_zero[0] = np.concatenate(tmp1)
-                non_zero[1] = np.concatenate(tmp2)
-
-            edge = torch.LongTensor(non_zero)
-            h = torch.mm(input, self.W)
-            # h: N x out
-            assert not torch.isnan(h).any()
-
-            # Self-attention on the nodes - Shared attention mechanism
-            edge_h = torch.cat((h[edge[0, :], :], h[edge[1, :], :]), dim=1).t()
-            # mask
-            # edge: 2 x E
-            # edge_h: E × 2F'
-
-            att = self.leakyrelu(self.a.mm(edge_h).squeeze())
-            edge_e = torch.exp(-att)
-            assert not torch.isnan(edge_e).any()
-            # edge_e: E × 1
-
-            edge_e = self.dropout(edge_e)
-
-            h_prime = self.special_spmm(edge, edge_e, torch.Size([N, N]), h)
-            # 自动mask,因为其他是0
-            assert not torch.isnan(h_prime).any()
-            # h_prime: N x out
-
-            assert not torch.isnan(h_prime).any()
-
-            if self.concat:
-                # if this layer is not last layer,
-                return F.elu(h_prime), att
-            else:
-                # if this layer is last layer,
-                return h_prime, att
     def __repr__(self):
         return self.__class__.__name__ + ' (' + str(self.in_features) + ' -> ' + str(self.out_features) + ')'
 

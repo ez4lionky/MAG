@@ -1,3 +1,4 @@
+import os
 import math
 import torch
 import random
@@ -16,7 +17,6 @@ class Classifier(nn.Module):
         self.dgcnn = Model(latent_dim=args.latent_dim,
                          num_node_feats=args.feat_dim + args.attr_dim,
                          # label one hot vector dimension + att dimension
-                         node_feature_size=args.feat_dim,
                          k=args.sortpool_k)
 
         out_dim = self.dgcnn.dense_dim
@@ -52,8 +52,11 @@ class Classifier(nn.Module):
 
         if node_tag_flag == True:
             concat_tag = torch.LongTensor(concat_tag).view(-1, 1)
-            node_tag = torch.zeros(n_nodes, args.feat_dim)
-            node_tag.scatter_(1, concat_tag, 1)
+            if args.embedding==True:
+                node_tag = concat_tag
+            else:
+                node_tag = torch.zeros(n_nodes, args.feat_dim)
+                node_tag.scatter_(1, concat_tag, 1)
 
         if node_feat_flag == True:
             node_feat = torch.cat(concat_feat, 0)
@@ -71,7 +74,6 @@ class Classifier(nn.Module):
 
         node_feat = node_feat.cuda()
         labels = labels.cuda()
-
         return node_feat, labels
 
 
@@ -142,37 +144,66 @@ def loop_dataset(g_list, clf, sample_idxes, optimizer=None, bsize=args.batch_siz
 
 
 if __name__ == '__main__':
-    train_graphs, test_graphs = load_data()
-    # graphs = load_data()
+    if os.path.exists('results/acc_results.txt'):
+        os.remove('results/acc_results.txt')
+        print('Delete')
+    if os.path.exists('results/auc_results.txt'):
+        os.remove('results/auc_results.txt')
+        print('Delete')
+    # train_graphs, test_graphs = load_data()
+    graphs = load_data()
+    labels = [graphs[idx].label for idx in range(len(graphs))]
     print(args)
     random.seed(1)
     if args.sortpool_k <= 1:
-        num_nodes_list = sorted([g.num_nodes for g in train_graphs + test_graphs])
+        num_nodes_list = sorted([g.num_nodes for g in graphs])
         args.sortpool_k = num_nodes_list[int(math.ceil(args.sortpool_k * len(num_nodes_list))) - 1]
         args.sortpool_k = max(10, args.sortpool_k)
         print('k used in SortPooling is: ' + str(args.sortpool_k))
-    # skf = StratifiedKFold(n_splits=10)
-    # for train_index, test_index in skf.split(graphs):
-    #     train_graphs, test_graphs = graphs[train_index], graphs[test_index]
-    clf = Classifier()
-    clf = clf.cuda()
-    optimizer = optim.Adam(clf.parameters(), lr=args.lr)
-    train_idxes = list(range(len(train_graphs)))
-    for epoch in range(args.num_epochs):
-        random.shuffle(train_idxes)
-        clf.train()
+    skf = StratifiedKFold(n_splits=10)
 
-        # 模型进入训练模式，train和eval方法，主要是drop out与batch_norm层的操作不同
-        avg_loss = loop_dataset(train_graphs, clf, train_idxes, optimizer=optimizer)
-        print('\033[92maverage training of epoch %d: loss %.5f acc %.5f auc %.5f\033[0m' % (epoch, avg_loss[0], avg_loss[1], avg_loss[2]))
+    accs = []
+    aucs = []
+    for train_index, test_index in skf.split(graphs, labels):
+        print('Training samples', len(train_index))
+        print('Testing samples', len(test_index))
+        train_graphs, test_graphs = np.array(graphs)[train_index], np.array(graphs)[test_index]
+        clf = Classifier()
+        clf = clf.cuda()
+        optimizer = optim.Adam(clf.parameters(), lr=args.lr)
+        train_idxes = list(range(len(train_graphs)))
+        for epoch in range(args.num_epochs):
+            random.shuffle(train_idxes)
+            clf.train()
 
-        clf.eval()
-        # 固定住model的参数
+            # 模型进入训练模式，train和eval方法，主要是drop out与batch_norm层的操作不同
+            avg_loss = loop_dataset(train_graphs, clf, train_idxes, optimizer=optimizer)
+            print('\033[92maverage training of epoch %d: loss %.5f acc %.5f auc %.5f\033[0m' % (epoch, avg_loss[0], avg_loss[1], avg_loss[2]))
+
+            clf.eval()
+            # 固定住model的参数
+            test_loss = loop_dataset(test_graphs, clf, list(range(len(test_graphs))))
+            print('\033[93maverage test of epoch %d: loss %.5f acc %.5f auc %.5f\033[0m' % (epoch, test_loss[0], test_loss[1], test_loss[2]))
+
+        print("Test result：")
         test_loss = loop_dataset(test_graphs, clf, list(range(len(test_graphs))))
-        print('\033[93maverage test of epoch %d: loss %.5f acc %.5f auc %.5f\033[0m' % (epoch, test_loss[0], test_loss[1], test_loss[2]))
+        print('acc ', test_loss[1], ' auc ', test_loss[2])
+        with open('results/acc_results.txt', 'a+') as f:
+            f.write(str(test_loss[1]) + '\n')
+        accs.append(test_loss[1])
 
-    with open('acc_results.txt', 'a+') as f:
-        f.write(str(test_loss[1]) + '\n')
+        with open('results/auc_results.txt', 'a+') as f:
+            f.write(str(test_loss[2]) + '\n')
+        aucs.append(test_loss[2])
 
-    with open('auc_results.txt', 'a+') as f:
-        f.write(str(test_loss[2]) + '\n')
+    accs = np.array(accs)
+    mean_acc = np.sum(accs) / len(accs)
+    with open('results/acc_results.txt', 'a+') as f:
+        f.write('Mean_acc：\n')
+        f.write(str(mean_acc) + '\n')
+
+    aucs = np.array(aucs)
+    mean_auc = np.sum(aucs) / len(aucs)
+    with open('results/auc_results.txt', 'a+') as f:
+        f.write('Mean_auc：\n')
+        f.write(str(mean_auc) + '\n')

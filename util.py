@@ -6,23 +6,26 @@ import networkx as nx
 cmd_par = argparse.ArgumentParser(description='Argparser for graph classification experiments')
 cmd_par.add_argument('-data', default='DD', help='data folder name')
 cmd_par.add_argument('-fold', type=int, default=1, help='Test data fold 1-10')
-cmd_par.add_argument('-latent_dim', type=str, default='32 32 32', help='dimension(s) of attention layers')
-cmd_par.add_argument('-num_epochs', type=int, default=100, help='number of epochs')
+cmd_par.add_argument('-latent_dim', type=str, default='32 32 32 32', help='dimension(s) of attention layers')
+cmd_par.add_argument('-num_epochs', type=int, default=200, help='number of epochs')
 cmd_par.add_argument('-sortpool_k', type=float, default=0.6, help='Percentage of nodes kept after SortPooling')
-cmd_par.add_argument('-lr', type=float, default=0.0002, help='init learning_rate')
-cmd_par.add_argument('-hidden', type=int, default=200, help='dimension of regression')
-cmd_par.add_argument('-batch_size', type=int, default=30, help='minibatch size')
-cmd_par.add_argument('-model', type=str, default='fusion', help='concat, separate, fusion')
+cmd_par.add_argument('-lr', type=float, default=0.00001, help='init learning_rate')
+cmd_par.add_argument('-hidden', type=int, default=128, help='dimension of regression')
+cmd_par.add_argument('-batch_size', type=int, default=50, help='minibatch size')
+cmd_par.add_argument('-model', type=str, default='fusion', help='concat, separate, fusion, no-att')
+cmd_par.add_argument('-embedding', type=bool, default=False, help='True or false')
 # 0 presents Attention in concat features, 1 presents Attention separate, 2 presents add fusion function
-cmd_par.add_argument('-concat', type=int, default=1, help='0 presents concat, 1 presents not concat')
+cmd_par.add_argument('-concat', type=int, default=0, help='0 presents 1D-CNN feature concat, 1 presents not concat')
 cmd_par.add_argument('-ff', type=str, default='mul', help='fusion function - max, sum, mul')
+cmd_par.add_argument('-cv', type=bool, default=True, help='whether to apply cross-validation')
+
 
 args = cmd_par.parse_args()
 args.latent_dim = [int(x) for x in args.latent_dim.split(' ')]
 if len(args.latent_dim) == 1:
     args.latent_dim = args.latent_dim[0]
 
-class Graph(object):
+class Graph(object):    
     def __init__(self, g, label, node_tags=None, node_features=None):
         '''
             g: a networkx graph
@@ -30,6 +33,7 @@ class Graph(object):
             node_tags: a list of integer node tags
             node_features: a numpy array of continuous node features
         '''
+
         self.num_nodes = len(node_tags)
         self.node_tags = node_tags
         self.label = label
@@ -130,13 +134,14 @@ def load_data():
 
     print('# classes: %d' % args.num_class)
     print('# maximum node tag: %d' % args.feat_dim)
-
-    train_idxes = np.loadtxt('data/%s/10fold_idx/train_idx-%d.txt' % (args.data, args.fold),
-                             dtype=np.int32).tolist()
-    test_idxes = np.loadtxt('data/%s/10fold_idx/test_idx-%d.txt' % (args.data, args.fold),
-                            dtype=np.int32).tolist()
-    return [g_list[i] for i in train_idxes], [g_list[i] for i in test_idxes]
-    return g_list
+    if args.cv==False:
+        train_idxes = np.loadtxt('data/%s/10fold_idx/train_idx-%d.txt' % (args.data, args.fold),
+                                 dtype=np.int32).tolist()
+        test_idxes = np.loadtxt('data/%s/10fold_idx/test_idx-%d.txt' % (args.data, args.fold),
+                                dtype=np.int32).tolist()
+        return [g_list[i] for i in train_idxes], [g_list[i] for i in test_idxes]
+    else:
+        return g_list
 
 if __name__ == '__main__':
     train_graphs, test_graphs = load_data()
