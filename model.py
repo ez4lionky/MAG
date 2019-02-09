@@ -18,8 +18,8 @@ class Model(nn.Module):
         super(Model, self).__init__()
         self.num_node_feats = num_node_feats
         self.latent_dim = latent_dim
-        if args.model=='concat' or args.model=='no-att':
-            # Attention in concat feature
+        if args.model=='concat' or args.model=='no-att' or args.model=='gin':
+            # attention in concat feature或者不使用attention或者gin，GCN后的feature均进行拼接
             self.k = k
             self.att_in_size = sum(latent_dim)
         elif args.model=='separate':
@@ -30,55 +30,75 @@ class Model(nn.Module):
             # Fusion attention multi scale
             self.k = k
             self.att_in_size = latent_dim[0]
+        if args.embedding==True:
+            self.embedding = nn.Embedding(num_node_feats, embedding_size)
 
-        self.embedding = nn.Embedding(num_node_feats, embedding_size)
         ''' GCN weights '''
         self.conv_params = nn.ModuleList()
-        if args.embedding==True:
-            self.conv_params.append(nn.Linear(embedding_size, latent_dim[0]))
+        if args.model=='gin':
+            for i in range(0, len(latent_dim)):
+                if i==0:
+                    self.conv_params.append(nn.Linear(num_node_feats, latent_dim[i]))
+                    self.conv_params.append(nn.Linear(latent_dim[i], latent_dim[i]))
+                else:
+                    self.conv_params.append(nn.Linear(latent_dim[i-1], latent_dim[i]))
+                    self.conv_params.append(nn.Linear(latent_dim[i], latent_dim[i]))
         else:
-            self.conv_params.append(nn.Linear(num_node_feats, latent_dim[0]))
-        # X * W => N * F'
-        # latent_dim是图卷积层的channel数
-        # 添加GCN的weights参数
-        for i in range(1, len(latent_dim)):
-            self.conv_params.append(nn.Linear(latent_dim[i-1], latent_dim[i]))
+            if args.embedding==True:
+                self.conv_params.append(nn.Linear(embedding_size, latent_dim[0]))
+            else:
+                self.conv_params.append(nn.Linear(num_node_feats, latent_dim[0]))
+            # X * W => N * F'
+            # latent_dim是图卷积层的channel数
+            # 添加GCN的weights参数
+            for i in range(1, len(latent_dim)):
+                self.conv_params.append(nn.Linear(latent_dim[i-1], latent_dim[i]))
 
         att_out_size = latent_dim[-1]
+
         ''' Sort pool attention '''
-        self.attention = [SpGraphAttentionLayer(in_features=self.att_in_size, out_features=att_out_size,
-                                                layer=len(latent_dim),concat=True) for _ in range(n_heads)]
-        for i in range(n_heads):
-            self.attention[i] = self.attention[i].cuda()
+        if args.model!='gin' or args.model!='no-att':
+            self.attention = [SpGraphAttentionLayer(in_features=self.att_in_size, out_features=att_out_size,
+                                                    layer=len(latent_dim),concat=True) for _ in range(n_heads)]
+            for i in range(n_heads):
+                self.attention[i] = self.attention[i].cuda()
 
         if args.model=='fusion':
+            # fusion 不需要对attention进行concat
             self.att_out_size = att_out_size
         elif args.model=='no-att':
+            # 普通的GCN，对几次GCN的feature进行concat，此时的att_out_size只是输出维度
             self.att_out_size = sum(latent_dim)
+        elif args.model=='gin':
+            self.att_out_size = sum(latent_dim) + num_node_feats
         else:
-            # fusion 不需要对attention进行concat
+            # separate和concat都是使用的multi-head GAT，所以 * n_heads
             self.att_out_size = att_out_size * n_heads
         conv1d_kws[0] = self.att_out_size
+
         ''' 2layers 1DCNN for classification '''
         # 最后两层1D卷积和全连接层用于分类
         # sort pooling最后的输出是batch_size, 1, k * 97
         # 所以kernel_size为97，stride为97，对图的每一个顶点的feature（即WL signature）进行一次卷积操作
-        self.conv1d_params1 = nn.Conv1d(1, conv1d_channels[0], conv1d_kws[0], conv1d_kws[0])
-        self.conv1d_params1 = self.conv1d_params1.cuda()
-        # batch_size * channels[0] * k
-        self.maxpool1d = nn.MaxPool1d(2, 2)
-        # batch_size * channels[0] * ((k-2) / 2 + 1)
-        self.conv1d_params2 = nn.Conv1d(conv1d_channels[0], conv1d_channels[1], conv1d_kws[1])
-        # 最后一层卷积的kernel_size为5，stride为1，输出维度为 batch_size * channels[1] * ((k-2) / 2 + 1)
+        # self.conv1d_params1 = nn.Conv1d(1, conv1d_channels[0], conv1d_kws[0], conv1d_kws[0])
+        # self.conv1d_params1 = self.conv1d_params1.cuda()
+        # # batch_size * channels[0] * k
+        # self.maxpool1d = nn.MaxPool1d(2, 2)
+        # # batch_size * channels[0] * ((k-2) / 2 + 1)
+        # self.conv1d_params2 = nn.Conv1d(conv1d_channels[0], conv1d_channels[1], conv1d_kws[1])
+        # # 最后一层卷积的kernel_size为5，stride为1，输出维度为 batch_size * channels[1] * ((k-2) / 2 + 1)
 
-        dense_dim = int((self.k - 2) / 2 + 1)
-        if args.concat==0:
-            # not concat
-            self.dense_dim = (dense_dim - conv1d_kws[1] + 1) * conv1d_channels[1]
-        elif args.concat==1:
-            # concat 1DCNN
-            self.dense_dim = (dense_dim - conv1d_kws[1] + 1) * conv1d_channels[1] + dense_dim * conv1d_channels[0]
-
+        if args.model!='gin':
+            dense_dim = int((self.k - 2) / 2 + 1)
+            if args.concat==0:
+                # not concat
+                self.dense_dim = (dense_dim - conv1d_kws[1] + 1) * conv1d_channels[1]
+            elif args.concat==1:
+                # concat 1DCNN
+                self.dense_dim = (dense_dim - conv1d_kws[1] + 1) * conv1d_channels[1] + dense_dim * conv1d_channels[0]
+        else:
+            # self.dense_dim = sum(latent_dim) + args.feat_dim
+            self.dense_dim = latent_dim[-1]
         # self.lstm = torch.nn.LSTM(self.total_latent_dim, lstm_hidden, 2)
         # self.dense_dim = self.k * lstm_hidden
         # MLP层的输入维度，即logits=conv1d_res.view(len(graph_sizes), -1)的维度
@@ -113,6 +133,19 @@ class Model(nn.Module):
 
         return h
 
+    def readout(self, batch_graph_features, graph_sizes):
+        batch_size = len(graph_sizes)
+        feat_dims = batch_graph_features.size()[-1]
+        readout_features = torch.zeros(batch_size, feat_dims)
+
+        accum_count = 0
+        for i in range(batch_size):
+            to_sum = batch_graph_features[accum_count: accum_count + graph_sizes[i]]
+            sum_features = torch.sum(to_sum, 0)
+            readout_features[i] = sum_features
+            accum_count += graph_sizes[i]
+        return readout_features.cuda()
+
     def sortpooling_embedding(self, non_zero, node_feat, n2n_sp, graph_sizes, node_degs):
         ''' graph convolution layers '''
         lv = 0
@@ -121,18 +154,40 @@ class Model(nn.Module):
         n2n_sp = n2n_sp.cuda()
         node_degs = node_degs.cuda()
         if args.embedding==True:
+            print('embedding')
             node_feat = self.embedding(node_feat.type(torch.LongTensor).cuda()).squeeze()
         cur_message_layer = node_feat
         cat_message_layers = []
-        while lv < len(self.latent_dim):
-            # n2n_sp即为邻接矩阵，一个batch所有图的邻接矩阵
-            n2npool = gnn_spmm(n2n_sp, cur_message_layer) + cur_message_layer  # Y = (A + I) * X
-            node_linear = self.conv_params[lv](n2npool)  # Y = Y * W => shape N * F'
-            normalized_linear = node_linear
-            # normalized_linear = node_linear.div(node_degs)  # Y = D^-1 * Y
-            cur_message_layer = torch.tanh(normalized_linear)
-            cat_message_layers.append(cur_message_layer)
-            lv += 1
+        output = None
+
+        if args.model=='gin':
+            while lv < 2 * len(self.latent_dim):
+                n2npool = gnn_spmm(n2n_sp, cur_message_layer) + cur_message_layer  # Y = (A + I) * X
+                # if lv==0:
+                #     cur_message_layer = (nn.BatchNorm1d(n2npool.size()[1])(n2npool.cpu())).cuda()
+                #     readout_features = self.readout(cur_message_layer, graph_sizes)
+                #     cat_message_layers.append(readout_features)
+                #     lv += 1
+                # else:
+                node_linear = self.conv_params[lv](n2npool)
+                node_linear = F.relu(node_linear)
+                cur_message_layer = self.conv_params[lv+1](node_linear)
+                cur_message_layer = F.relu(cur_message_layer)
+                cur_message_layer = (nn.BatchNorm1d(cur_message_layer.size()[1])(cur_message_layer.cpu())).cuda()
+                readout_features = self.readout(cur_message_layer, graph_sizes)
+                output = readout_features
+                cat_message_layers.append(readout_features)
+                lv += 2
+        else:
+            while lv < len(self.latent_dim):
+                # n2n_sp即为邻接矩阵，一个batch所有图的邻接矩阵
+                n2npool = gnn_spmm(n2n_sp, cur_message_layer) + cur_message_layer  # Y = (A + I) * X
+                node_linear = self.conv_params[lv](n2npool)  # Y = Y * W => shape N * F'
+                normalized_linear = node_linear
+                # normalized_linear = node_linear.div(node_degs)  # Y = D^-1 * Y
+                cur_message_layer = torch.tanh(normalized_linear)
+                cat_message_layers.append(cur_message_layer)
+                lv += 1
 
         # Attention in concat feature
         if args.model=='concat':
@@ -173,63 +228,70 @@ class Model(nn.Module):
             non_zero = torch.LongTensor(non_zero)
             cur_message_layer = special_spmm(non_zero, a_r, torch.Size([N, N]), cat_message_layers[-1])
             # (total_node, latent_dim)
+
         # No attention and just concat standard GNN
         elif args.model=='no-att':
             cur_message_layer = torch.cat(cat_message_layers, 1)
-        ''' sortpooling layer '''
-        sort_channel = cur_message_layer[:, -1]
-        # sort_channel：　total_node * 1
-        # 只对最后一个channel的feature进行sort
-        batch_sortpooling_graphs = torch.zeros(len(graph_sizes), self.k, self.att_out_size)
-        # 每一个图的顶点数都变为K
-        batch_sortpooling_graphs = Variable(batch_sortpooling_graphs)
-        if isinstance(node_feat.data, torch.cuda.FloatTensor):
-            batch_sortpooling_graphs = batch_sortpooling_graphs.cuda()
-        accum_count = 0
-        # sort pool操作只对node_feat进行操作
-        for i in range(batch_size):
-            to_sort = sort_channel[accum_count: accum_count + graph_sizes[i]]
-            k = self.k if self.k <= graph_sizes[i] else graph_sizes[i]  #　下面只需要判断是否pad
-            _, topk_indices = to_sort.topk(k)
-            # 返回K个最大值元组，(values, indices)
-            topk_indices += accum_count
-            # 因为是to_sort的indices，在原来的feature中提取出来还需要加上count
-            sortpooling_graph = cur_message_layer.index_select(0, topk_indices).cuda()
-            # 判断是否需要pad
-            if k < self.k:
-                to_pad = torch.zeros(self.k-k, self.att_out_size)
-                if isinstance(node_feat.data, torch.cuda.FloatTensor):
-                    to_pad = to_pad.cuda()
 
-                to_pad = Variable(to_pad)
-                sortpooling_graph = torch.cat((sortpooling_graph, to_pad), 0)
-            batch_sortpooling_graphs[i] = sortpooling_graph
-            accum_count += graph_sizes[i]
-            # 每次对一个batch的feature进行sort
+        ''' Readout function： sortpooling layer '''
+        if args.model!='gin':
+            sort_channel = cur_message_layer[:, -1]
+            # sort_channel：　total_node * 1
+            # 只对最后一个channel的feature进行sort
+            batch_sortpooling_graphs = torch.zeros(len(graph_sizes), self.k, self.att_out_size)
+            # 每一个图的顶点数都变为K
+            batch_sortpooling_graphs = Variable(batch_sortpooling_graphs)
+            if isinstance(node_feat.data, torch.cuda.FloatTensor):
+                batch_sortpooling_graphs = batch_sortpooling_graphs.cuda()
+            accum_count = 0
+            # sort pool操作只对node_feat进行操作
+            for i in range(batch_size):
+                to_sort = sort_channel[accum_count: accum_count + graph_sizes[i]]
+                k = self.k if self.k <= graph_sizes[i] else graph_sizes[i]  #　下面只需要判断是否pad
+                _, topk_indices = to_sort.topk(k)
+                # 返回K个最大值元组，(values, indices)
+                topk_indices += accum_count
+                # 因为是to_sort的indices，在原来的feature中提取出来还需要加上count
+                sortpooling_graph = cur_message_layer.index_select(0, topk_indices).cuda()
+                # 判断是否需要pad
+                if k < self.k:
+                    to_pad = torch.zeros(self.k-k, self.att_out_size)
+                    if isinstance(node_feat.data, torch.cuda.FloatTensor):
+                        to_pad = to_pad.cuda()
 
-        ''' traditional 1d convlution and dense layers '''
-        # batch_size * self.k * att_out_dim
-        # 图的数量 * 每个图固定的顶点数 * 最终维度
-        res = []
-        to_conv1d = batch_sortpooling_graphs.view((-1, 1, self.k * self.att_out_size))
-        conv1d_res = self.conv1d_params1(to_conv1d)
-        conv1d_res = F.relu(conv1d_res)
-        # print("conv1d_res.shape", conv1d_res.shape) # 50 * 16 * 291
-        conv1d_res = self.maxpool1d(conv1d_res)
-        res.append(conv1d_res.view(len(graph_sizes), -1))
-        # print("conv1d_res.shape", conv1d_res.shape) # 50 * 16 * 145
-        conv1d_res = self.conv1d_params2(conv1d_res)
-        conv1d_res = F.relu(conv1d_res)
-        res.append(conv1d_res.view(len(graph_sizes), -1))
-        # print("conv1d_res.shape", conv1d_res.shape) # 50 * 32 * 141
+                    to_pad = Variable(to_pad)
+                    sortpooling_graph = torch.cat((sortpooling_graph, to_pad), 0)
+                batch_sortpooling_graphs[i] = sortpooling_graph
+                accum_count += graph_sizes[i]
+                # 每次对一个batch的feature进行sort
 
-        if args.concat==0:
-            to_dense = conv1d_res.view(len(graph_sizes), -1)
-        elif args.concat==1:
-            to_dense = torch.cat(res, 1)
+            ''' traditional 1d convlution and dense layers '''
+            # batch_size * self.k * att_out_dim
+            # 图的数量 * 每个图固定的顶点数 * 最终维度
+            res = []
 
+            to_conv1d = batch_sortpooling_graphs.view((-1, 1, self.k * self.att_out_size))
+            conv1d_res = self.conv1d_params1(to_conv1d)
+            conv1d_res = F.relu(conv1d_res)
+            # print("conv1d_res.shape", conv1d_res.shape) # 50 * 16 * 291
+            conv1d_res = self.maxpool1d(conv1d_res)
+            res.append(conv1d_res.view(len(graph_sizes), -1))
+            # print("conv1d_res.shape", conv1d_res.shape) # 50 * 16 * 145
+            conv1d_res = self.conv1d_params2(conv1d_res)
+            conv1d_res = F.relu(conv1d_res)
+            res.append(conv1d_res.view(len(graph_sizes), -1))
+            # print("conv1d_res.shape", conv1d_res.shape) # 50 * 32 * 141
 
-        return F.relu(to_dense)
+        if args.model=='gin':
+            # to_dense = torch.cat(cat_message_layers, 1)
+            to_dense = cat_message_layers[-1]
+        else:
+            if args.concat==0:
+                to_dense = conv1d_res.view(len(graph_sizes), -1)
+            elif args.concat==1:
+                to_dense = torch.cat(res, 1)
+
+        return output
 
         # to_lstm = batch_sortpooling_graphs.view((self.k, -1, self.att_out_dim))
         # lstm_features, self_hidden = self.lstm(to_lstm)
@@ -249,10 +311,10 @@ class MLPClassifier(nn.Module):
     def forward(self, x, y = None):
         h1 = self.h1_weights(x)
         h1 = F.relu(h1)
-        h1 = F.dropout(h1, training=True)
+        h1 = F.dropout(h1, 0.5, training=True)
 
         logits = self.h2_weights(h1)
-        logits = F.log_softmax(logits, dim=1)
+        logits = F.log_softmax(logits, dim=-1)
 
         if y is not None:
             y = Variable(y)
@@ -313,7 +375,7 @@ class SpGraphAttentionLayer(nn.Module):
         self.a = nn.Parameter(torch.zeros(size=(1, 2 * out_features)))
         nn.init.xavier_normal_(self.a.data, gain=1.414)
 
-        self.dropout = nn.Dropout(0.3)
+        self.dropout = nn.Dropout(0.5)
         self.leakyrelu = nn.LeakyReLU(0.2)
         self.special_spmm = SpecialSpmm()
         self.softmax = nn.Softmax(dim=1)

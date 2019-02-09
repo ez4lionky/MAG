@@ -6,7 +6,7 @@ import numpy as np
 import torch.nn as nn
 import torch.optim as optim
 from model import Model, MLPClassifier
-from util import args, load_data
+from util import args, load_data, print_params
 from sklearn import metrics
 from sklearn.model_selection import StratifiedKFold
 
@@ -143,6 +143,14 @@ def loop_dataset(g_list, clf, sample_idxes, optimizer=None, bsize=args.batch_siz
     return avg_loss
 
 
+def adjust_learning_rate(optimizer, epoch):
+    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+    lr = args.lr * (0.5 ** (epoch // 50))
+    print("current learning rate： ", lr)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+
 if __name__ == '__main__':
     if os.path.exists('results/acc_results.txt'):
         os.remove('results/acc_results.txt')
@@ -173,9 +181,10 @@ if __name__ == '__main__':
         optimizer = optim.Adam(clf.parameters(), lr=args.lr)
         train_idxes = list(range(len(train_graphs)))
         for epoch in range(args.num_epochs):
-            random.shuffle(train_idxes)
-            clf.train()
+            adjust_learning_rate(optimizer, epoch+1)
+            # random.shuffle(train_idxes)
 
+            clf.train()
             # 模型进入训练模式，train和eval方法，主要是drop out与batch_norm层的操作不同
             avg_loss = loop_dataset(train_graphs, clf, train_idxes, optimizer=optimizer)
             print('\033[92maverage training of epoch %d: loss %.5f acc %.5f auc %.5f\033[0m' % (epoch, avg_loss[0], avg_loss[1], avg_loss[2]))
@@ -196,6 +205,10 @@ if __name__ == '__main__':
             f.write(str(test_loss[2]) + '\n')
         aucs.append(test_loss[2])
 
+
+    named_params = clf.named_parameters()
+    state = clf.state_dict()
+    print_params(named_params, state)
     accs = np.array(accs)
     mean_acc = np.sum(accs) / len(accs)
     with open('results/acc_results.txt', 'a+') as f:

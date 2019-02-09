@@ -1,23 +1,25 @@
+import torch
 import numpy as np
 import argparse
 import networkx as nx
+from graphviz import Digraph
+from torch.autograd import Variable
 
 # ？问题，argparse.ArgumnetParser的值可以通过import共享？还是说每次导入都会重新读
 cmd_par = argparse.ArgumentParser(description='Argparser for graph classification experiments')
-cmd_par.add_argument('-data', default='DD', help='data folder name')
+cmd_par.add_argument('-data', default='MUTAG', help='data folder name')
 cmd_par.add_argument('-fold', type=int, default=1, help='Test data fold 1-10')
-cmd_par.add_argument('-latent_dim', type=str, default='32 32 32 32', help='dimension(s) of attention layers')
+cmd_par.add_argument('-latent_dim', type=str, default='32 32 32 32 32', help='dimension(s) of attention layers')
 cmd_par.add_argument('-num_epochs', type=int, default=200, help='number of epochs')
 cmd_par.add_argument('-sortpool_k', type=float, default=0.6, help='Percentage of nodes kept after SortPooling')
-cmd_par.add_argument('-lr', type=float, default=0.00001, help='init learning_rate')
-cmd_par.add_argument('-hidden', type=int, default=128, help='dimension of regression')
-cmd_par.add_argument('-batch_size', type=int, default=50, help='minibatch size')
-cmd_par.add_argument('-model', type=str, default='fusion', help='concat, separate, fusion, no-att')
+cmd_par.add_argument('-lr', type=float, default=0.01, help='init learning_rate')
+cmd_par.add_argument('-hidden', type=int, default=32, help='dimension of regression')
+cmd_par.add_argument('-batch_size', type=int, default=128, help='minibatch size')
+cmd_par.add_argument('-model', type=str, default='gin', help='concat, separate, fusion, no-att, gin')
 cmd_par.add_argument('-embedding', type=bool, default=False, help='True or false')
 # 0 presents Attention in concat features, 1 presents Attention separate, 2 presents add fusion function
-cmd_par.add_argument('-concat', type=int, default=0, help='0 presents 1D-CNN feature concat, 1 presents not concat')
+cmd_par.add_argument('-concat', type=int, default=1, help='0 presents 1D-CNN feature concat, 1 presents not concat')
 cmd_par.add_argument('-ff', type=str, default='mul', help='fusion function - max, sum, mul')
-cmd_par.add_argument('-cv', type=bool, default=True, help='whether to apply cross-validation')
 
 
 args = cmd_par.parse_args()
@@ -25,7 +27,7 @@ args.latent_dim = [int(x) for x in args.latent_dim.split(' ')]
 if len(args.latent_dim) == 1:
     args.latent_dim = args.latent_dim[0]
 
-class Graph(object):    
+class Graph(object):
     def __init__(self, g, label, node_tags=None, node_features=None):
         '''
             g: a networkx graph
@@ -134,14 +136,74 @@ def load_data():
 
     print('# classes: %d' % args.num_class)
     print('# maximum node tag: %d' % args.feat_dim)
-    if args.cv==False:
-        train_idxes = np.loadtxt('data/%s/10fold_idx/train_idx-%d.txt' % (args.data, args.fold),
-                                 dtype=np.int32).tolist()
-        test_idxes = np.loadtxt('data/%s/10fold_idx/test_idx-%d.txt' % (args.data, args.fold),
-                                dtype=np.int32).tolist()
-        return [g_list[i] for i in train_idxes], [g_list[i] for i in test_idxes]
-    else:
-        return g_list
+
+    return g_list
+
+
+def make_dot(var, params=None):
+    """ Produces Graphviz representation of PyTorch autograd graph
+    Blue nodes are the Variables that require grad, orange are Tensors
+    saved for backward in torch.autograd.Function
+    Args:
+        var: output Variable
+        params: dict of (name, Variable) to add names to node that
+            require grad (TODO: make optional)
+    """
+    if params is not None:
+        assert isinstance(params.values()[0], Variable)
+        param_map = {id(v): k for k, v in params.items()}
+
+    node_attr = dict(style='filled',
+                     shape='box',
+                     align='left',
+                     fontsize='12',
+                     ranksep='0.1',
+                     height='0.2')
+    dot = Digraph(node_attr=node_attr, graph_attr=dict(size="12,12"))
+    seen = set()
+
+    def size_to_str(size):
+        return '(' + (', ').join(['%d' % v for v in size]) + ')'
+
+    def add_nodes(var):
+        if var not in seen:
+            if torch.is_tensor(var):
+                dot.node(str(id(var)), size_to_str(var.size()), fillcolor='orange')
+            elif hasattr(var, 'variable'):
+                u = var.variable
+                name = param_map[id(u)] if params is not None else ''
+                node_name = '%s\n %s' % (name, size_to_str(u.size()))
+                dot.node(str(id(var)), node_name, fillcolor='lightblue')
+            else:
+                dot.node(str(id(var)), str(type(var).__name__))
+            seen.add(var)
+            if hasattr(var, 'next_functions'):
+                for u in var.next_functions:
+                    if u[0] is not None:
+                        dot.edge(str(id(u[0])), str(id(var)))
+                        add_nodes(u[0])
+            if hasattr(var, 'saved_tensors'):
+                for t in var.saved_tensors:
+                    dot.edge(str(id(t)), str(id(var)))
+                    add_nodes(t)
+
+    add_nodes(var.grad_fn)
+    return dot
+
+
+def print_params(params, state_dict):
+    k = 0
+    for name, param in params:
+        l = 1
+        print(name)
+        print('Requires_grad: ', param.requires_grad)
+        print("该层的结构：" + str(list(param.size())))
+        for j in param.size():
+            l *= j
+        print("该层参数和：" + str(l))
+        k = k + l
+    print("总参数数量和：" + str(k))
+
 
 if __name__ == '__main__':
     train_graphs, test_graphs = load_data()
